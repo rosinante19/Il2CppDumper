@@ -40,6 +40,153 @@ namespace Il2CppDumper
 
         private readonly Dictionary<uint, string> stringCache = new();
 
+        private List<uint> GetHeaderAttributesValues(Il2CppGlobalMetadataHeader header)
+        {
+            var values = new List<uint>();
+            foreach (var i in header.GetType().GetFields())
+            {
+                if (Attribute.IsDefined(i, typeof(VersionAttribute)))
+                {
+                    var versionAttributes = i.GetCustomAttributes<VersionAttribute>().ToArray();
+                    if (versionAttributes.Length > 0)
+                    {
+                        var read = false;
+                        foreach (var versionAttribute in versionAttributes)
+                        {
+                            if (Version >= versionAttribute.Min && Version <= versionAttribute.Max)
+                            {
+                                read = true;
+                            }
+                        }
+                        if (!read)
+                        {
+                            continue;
+                        }
+                    }
+                }
+                var val = Convert.ToUInt32(i.GetValue(header));
+                values.Add(val);
+            }
+            return values;
+        }
+
+        private void ApplyHeaderAttributesValues(Il2CppGlobalMetadataHeader header, List<uint> values)
+        {
+            int ind = -3;
+            foreach (var i in header.GetType().GetFields())
+            {
+                if (Attribute.IsDefined(i, typeof(VersionAttribute)))
+                {
+                    var versionAttributes = i.GetCustomAttributes<VersionAttribute>().ToArray();
+                    if (versionAttributes.Length > 0)
+                    {
+                        var read = false;
+                        foreach (var versionAttribute in versionAttributes)
+                        {
+                            if (Version >= versionAttribute.Min && Version <= versionAttribute.Max)
+                            {
+                                read = true;
+                            }
+                        }
+                        if (!read)
+                        {
+                            continue;
+                        }
+                    }
+                }
+                ind++;
+                if (ind < 0)
+                {
+                    continue;
+                }
+                if (i.FieldType.Name == "UInt32")
+                {
+                    i.SetValue(header, Convert.ToUInt32(values[ind]));
+                }
+                else
+                {
+                    i.SetValue(header, Convert.ToInt32(values[ind]));
+                }
+            }
+        }
+
+        private List<uint[]> FindSizeNextOffset(List<uint> arr, uint offset)
+        {
+            var possibleNextOffset = arr.Where(x => x >= offset).ToList();
+            var foundNextOffsets = new List<uint>();
+            List<uint[]> res = new List<uint[]>();
+
+            foreach (var size in arr)
+            {
+                uint sum = offset + size;
+                foreach (var nextOffset in possibleNextOffset)
+                {
+                    if (sum == nextOffset && foundNextOffsets.FindIndex(a => a == sum) < 0)
+                    {
+                        res.Add(new uint[2] {offset, size});
+                    }
+                }
+            }
+            return res;
+        }
+
+        private List<uint> DoShit(List<uint> arr, uint startOffset)
+        {
+            if (arr.Count > 2)
+            {
+                var ind = arr.FindIndex(a => a == startOffset);
+                arr.RemoveAt(ind);
+            }
+            else
+            {
+                var i = arr.FindIndex(a => a != startOffset);
+                List<uint> ret = new List<uint>();
+                ret.Add(startOffset);
+                ret.Add(arr[i]);
+                return ret;
+            }
+
+            var found = FindSizeNextOffset(arr, startOffset);
+            if (found.Count == 0)
+            {
+                found = FindSizeNextOffset(arr, startOffset + 4);
+            }
+
+            bool removed = false;
+            foreach (var f in found)
+            {
+                if (!removed)
+                {
+                    var ind = arr.FindIndex(a => a == f[1]);
+                    arr.RemoveAt(ind);
+                    removed = true;
+                }
+
+                var res = DoShit(arr, f[0] + f[1]);
+                if (res != null)
+                {
+                    res.Insert(0, startOffset);
+                    res.Insert(1, f[1]);
+                    return res;
+                }
+            }
+
+            return null;
+        }
+
+        public void NormalizeHeader(Il2CppGlobalMetadataHeader header)
+        {
+            var attrs = GetHeaderAttributesValues(header);
+            uint startOffset = Convert.ToUInt32(attrs.Count * 4);
+            attrs.RemoveRange(0, 2); // skip sanity and version
+            var res = DoShit(attrs, startOffset);
+            // foreach (var r in res)
+            // {
+            //     Console.WriteLine($">>>>>>>>>>>> {r}");
+            // }
+            ApplyHeaderAttributesValues(header, res);
+        }
+
         public Metadata(Stream stream) : base(stream)
         {
             var sanity = ReadUInt32();
@@ -58,6 +205,7 @@ namespace Il2CppDumper
             }
             Version = version;
             header = ReadClass<Il2CppGlobalMetadataHeader>(0);
+            NormalizeHeader(header);
             if (version == 24)
             {
                 if (header.stringLiteralOffset == 264)
